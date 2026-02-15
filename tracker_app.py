@@ -1,41 +1,44 @@
-import os
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-APP_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.join(APP_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-MEALS_CSV = os.path.join(DATA_DIR, "meals.csv")
-WORKOUTS_CSV = os.path.join(DATA_DIR, "workouts.csv")
-WEIGHT_CSV = os.path.join(DATA_DIR, "weight.csv")
+import gspread
+from google.oauth2.service_account import Credentials
 
 
-def _init_csv(path: str, columns: list[str]) -> None:
-    if not os.path.exists(path):
-        pd.DataFrame(columns=columns).to_csv(path, index=False, encoding="utf-8-sig")
+# ----------------------------
+# Google Sheets helpers
+# ----------------------------
+@st.cache_resource
+def get_gsheets_client():
+    creds_dict = st.secrets["gcp_service_account"]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    return gspread.authorize(creds)
+
+def open_sheet():
+    gc = get_gsheets_client()
+    spreadsheet_id = st.secrets["sheets"]["spreadsheet_id"]
+    return gc.open_by_key(spreadsheet_id)
+
+def append_row(sheet_name: str, row_values: list):
+    sh = open_sheet()
+    ws = sh.worksheet(sheet_name)
+    ws.append_row(row_values, value_input_option="USER_ENTERED")
+
+def read_df(sheet_name: str) -> pd.DataFrame:
+    sh = open_sheet()
+    ws = sh.worksheet(sheet_name)
+    records = ws.get_all_records()  # uses row1 as header
+    return pd.DataFrame(records)
 
 
-_init_csv(MEALS_CSV, ["timestamp", "date", "meal_slot", "items", "notes"])
-_init_csv(WORKOUTS_CSV, ["timestamp", "date", "workout_type", "duration_min", "notes"])
-_init_csv(WEIGHT_CSV, ["timestamp", "date", "weight_kg", "waist_cm", "sleep_h", "condition_1to5", "alcohol"])
-
-
-def load_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    return df
-
-
-def append_row(path: str, row: dict) -> None:
-    df = load_csv(path)
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-
-
+# ----------------------------
+# UI
+# ----------------------------
 st.set_page_config(page_title="감량 코치 트래커", layout="wide")
-st.title("감량 코치 트래커 (로컬 저장 • CSV 누적)")
+st.title("감량 코치 트래커 (Google Sheets 영구 저장)")
 
 tab1, tab2, tab3 = st.tabs(["✅ 오늘 기록", "📊 대시보드", "🗂 데이터 보기/백업"])
 
@@ -55,19 +58,22 @@ with tab1:
         alcohol = st.selectbox("음주", ["없음", "1~2잔", "소주 1병", "소주 1병 이상"])
     with colD:
         if st.button("체중/컨디션 저장"):
-            append_row(
-                WEIGHT_CSV,
-                {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "date": d.isoformat(),
-                    "weight_kg": weight,
-                    "waist_cm": waist,
-                    "sleep_h": sleep_h,
-                    "condition_1to5": condition,
-                    "alcohol": alcohol,
-                },
-            )
-            st.success("저장 완료!")
+            try:
+                append_row(
+                    "weight",
+                    [
+                        datetime.now().isoformat(timespec="seconds"),
+                        d.isoformat(),
+                        float(weight),
+                        float(waist),
+                        float(sleep_h),
+                        int(condition),
+                        alcohol,
+                    ],
+                )
+                st.success("저장 완료! (Google Sheets)")
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
 
     st.divider()
     st.subheader("2) 식단 기록 (카톡처럼 한 줄로 붙여넣기 가능)")
@@ -79,17 +85,20 @@ with tab1:
         if items.strip() == "":
             st.error("먹은 것을 입력해줘.")
         else:
-            append_row(
-                MEALS_CSV,
-                {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "date": d.isoformat(),
-                    "meal_slot": meal_slot,
-                    "items": items.strip(),
-                    "notes": meal_notes.strip(),
-                },
-            )
-            st.success("식단 저장 완료!")
+            try:
+                append_row(
+                    "meals",
+                    [
+                        datetime.now().isoformat(timespec="seconds"),
+                        d.isoformat(),
+                        meal_slot,
+                        items.strip(),
+                        meal_notes.strip(),
+                    ],
+                )
+                st.success("식단 저장 완료! (Google Sheets)")
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
 
     st.divider()
     st.subheader("3) 운동 기록")
@@ -98,33 +107,40 @@ with tab1:
     wnotes = st.text_input("운동 메모(선택)", placeholder="예) 스쿼트 170, 데드 220 / 인터벌 10분")
 
     if st.button("운동 저장"):
-        append_row(
-            WORKOUTS_CSV,
-            {
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "date": d.isoformat(),
-                "workout_type": wtype,
-                "duration_min": duration,
-                "notes": wnotes.strip(),
-            },
-        )
-        st.success("운동 저장 완료!")
+        try:
+            append_row(
+                "workouts",
+                [
+                    datetime.now().isoformat(timespec="seconds"),
+                    d.isoformat(),
+                    wtype,
+                    int(duration),
+                    wnotes.strip(),
+                ],
+            )
+            st.success("운동 저장 완료! (Google Sheets)")
+        except Exception as e:
+            st.error(f"저장 실패: {e}")
 
 
 with tab2:
     st.subheader("📊 대시보드")
-    wdf = load_csv(WEIGHT_CSV)
-    mdf = load_csv(MEALS_CSV)
-    odf = load_csv(WORKOUTS_CSV)
 
-    # 정리
+    try:
+        wdf = read_df("weight")
+        mdf = read_df("meals")
+        odf = read_df("workouts")
+    except Exception as e:
+        st.error(f"시트 읽기 실패: {e}")
+        st.stop()
+
     if not wdf.empty:
-        wdf["date"] = pd.to_datetime(wdf["date"])
+        # type conversion
+        wdf["date"] = pd.to_datetime(wdf["date"], errors="coerce")
+        wdf["weight_kg"] = pd.to_numeric(wdf.get("weight_kg"), errors="coerce")
+        wdf["waist_cm"] = pd.to_numeric(wdf.get("waist_cm"), errors="coerce")
         wdf = wdf.sort_values("date")
 
-        # 7일 평균
-        wdf["weight_kg"] = pd.to_numeric(wdf["weight_kg"], errors="coerce")
-        wdf["waist_cm"] = pd.to_numeric(wdf["waist_cm"], errors="coerce")
         wdf["w7"] = wdf["weight_kg"].rolling(window=7, min_periods=1).mean()
 
         col1, col2, col3 = st.columns(3)
@@ -135,7 +151,6 @@ with tab2:
         if wdf["waist_cm"].dropna().shape[0] > 0:
             col3.metric("최근 허리(cm)", f"{float(wdf['waist_cm'].dropna().iloc[-1]):.1f}")
 
-        st.write("")
         fig = plt.figure()
         plt.plot(wdf["date"], wdf["weight_kg"], marker="o")
         plt.plot(wdf["date"], wdf["w7"])
@@ -166,14 +181,11 @@ with tab2:
 
 
 with tab3:
-    st.subheader("🗂 데이터 위치")
-    st.code(DATA_DIR)
+    st.subheader("🗂 구글 시트에 저장됩니다")
+    st.write("현재 연결된 spreadsheet_id:")
+    st.code(st.secrets["sheets"]["spreadsheet_id"])
 
-    st.write("아래 파일들이 누적 저장됩니다:")
-    st.code("meals.csv\nworkouts.csv\nweight.csv")
+    st.write("저장되는 시트 탭 이름:")
+    st.code("weight\nmeals\nworkouts")
 
-    st.divider()
-    st.subheader("⬇ CSV 다운로드(백업)")
-    for label, path in [("meals.csv", MEALS_CSV), ("workouts.csv", WORKOUTS_CSV), ("weight.csv", WEIGHT_CSV)]:
-        with open(path, "rb") as f:
-            st.download_button(label=f"Download {label}", data=f, file_name=label, mime="text/csv")
+    st.info("백업은 Google Sheets에서 파일 → 다운로드로 언제든지 할 수 있어요.")
